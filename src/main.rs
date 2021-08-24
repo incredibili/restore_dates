@@ -1,8 +1,10 @@
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use serde::de::Visitor;
 use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 use std::fmt::{Error, Formatter};
+use std::fs::File;
+use std::io::Write;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::{env, fmt, fs, io};
@@ -22,8 +24,6 @@ fn main() {
                     .expect(format!("Unable to read file {:?}", e.file_name()).as_str())
                     .into_iter()
                     .collect();
-
-                //let file_string = String::from_utf8(bytes).unwrap().into_bytes();
 
                 let mut reader = csv::ReaderBuilder::new()
                     .delimiter(b';')
@@ -51,7 +51,9 @@ fn main() {
                     .with_timezone(&Utc);
 
                 csv_result.into_iter().for_each(|csv_item| {
-                    if intermediari.contains_key(&String::from(csv_item.email.as_str())) {
+                    let lowercase_email = String::from(csv_item.email.as_str()).to_lowercase();
+
+                    if intermediari.contains_key(&lowercase_email) {
                         println!(
                             "Same intermediario email {:?} found twice",
                             csv_item.email.as_str()
@@ -59,11 +61,22 @@ fn main() {
                     }
 
                     if intermediari
-                        .get(csv_item.email.as_str())
+                        .get(&lowercase_email)
                         .filter(|&d| *d < activated_at_for_file)
                         .is_none()
                     {
-                        intermediari.insert(csv_item.email.into(), activated_at_for_file);
+                        intermediari.insert(lowercase_email, activated_at_for_file);
+                    }
+
+                    if organizations
+                        .get(csv_item.anagrafica_organization.as_str())
+                        .filter(|&d| *d < activated_at_for_file)
+                        .is_none()
+                    {
+                        organizations.insert(
+                            csv_item.anagrafica_organization.into(),
+                            activated_at_for_file,
+                        );
                     }
                 });
             })
@@ -71,9 +84,24 @@ fn main() {
         .collect::<Result<Vec<_>, io::Error>>()
         .unwrap();
 
-    println!("INTERMEDIARI: {:?}", intermediari);
+    let mut intermediari_sql_file = File::create("update_intermediari_activated_at.sql").unwrap();
 
-    //entries.sort();
+    intermediari.iter().for_each(|(k, v)| {
+        let date_sql = format!(
+            "{}-{:02}-{:02}T00:00:00.000000+00:00",
+            v.year(),
+            v.month(),
+            v.day()
+        );
+
+        let statement = format!(
+            "update intermediari set activated_at = '{}' where primary_email = '{}';\n",
+            date_sql, k
+        );
+        intermediari_sql_file
+            .write(&statement.into_bytes()[..])
+            .unwrap();
+    });
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -133,7 +161,7 @@ struct SanitizedString(String);
 
 impl SanitizedString {
     fn new(v: &str) -> Self {
-        Self(v.trim().to_lowercase().into())
+        Self(v.trim().into())
     }
 }
 
