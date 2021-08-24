@@ -1,6 +1,7 @@
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::de::Visitor;
 use serde::{Deserialize, Deserializer};
+use std::collections::HashMap;
 use std::fmt::{Error, Formatter};
 use std::ops::Deref;
 use std::str::FromStr;
@@ -10,11 +11,18 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let path = &args[1];
 
-    let mut entries = fs::read_dir(path)
-        .unwrap()
+    let mut organizations: HashMap<String, DateTime<Utc>> = HashMap::new();
+    let mut intermediari: HashMap<String, DateTime<Utc>> = HashMap::new();
+
+    fs::read_dir(path)
+        .expect("Unable to read folder")
         .map(|res| {
             res.map(|e| {
-                let bytes: Vec<u8> = fs::read(e.path()).unwrap().into_iter().collect();
+                let bytes: Vec<u8> = fs::read(e.path())
+                    .expect(format!("Unable to read file {:?}", e.file_name()).as_str())
+                    .into_iter()
+                    .collect();
+
                 //let file_string = String::from_utf8(bytes).unwrap().into_bytes();
 
                 let mut reader = csv::ReaderBuilder::new()
@@ -25,15 +33,45 @@ fn main() {
                     .collect::<Result<Vec<CsvLine>, csv::Error>>()
                     .unwrap();
 
+                let date_from_filename = &e.file_name().into_string().unwrap()[0..=7];
+
+                let year = &date_from_filename[0..=3];
+                let month = &date_from_filename[4..=5];
+                let day = &date_from_filename[6..=7];
+                let final_date = format!("{}-{}-{}T00:00:00.000000+00:00", year, month, day);
+
                 println!(
-                    "File: {:?}, numero records: {:?}",
+                    "Processing File: {:?}, timestamp: {:?}",
                     e.file_name(),
-                    csv_result.len()
+                    final_date
                 );
+
+                let activated_at_for_file = DateTime::parse_from_rfc3339(&final_date)
+                    .unwrap()
+                    .with_timezone(&Utc);
+
+                csv_result.into_iter().for_each(|csv_item| {
+                    if intermediari.contains_key(&String::from(csv_item.email.as_str())) {
+                        println!(
+                            "Same intermediario email {:?} found twice",
+                            csv_item.email.as_str()
+                        )
+                    }
+
+                    if intermediari
+                        .get(csv_item.email.as_str())
+                        .filter(|&d| *d < activated_at_for_file)
+                        .is_none()
+                    {
+                        intermediari.insert(csv_item.email.into(), activated_at_for_file);
+                    }
+                });
             })
         })
         .collect::<Result<Vec<_>, io::Error>>()
         .unwrap();
+
+    println!("INTERMEDIARI: {:?}", intermediari);
 
     //entries.sort();
 }
@@ -116,6 +154,12 @@ impl Deref for SanitizedString {
 impl From<String> for SanitizedString {
     fn from(str: String) -> Self {
         SanitizedString::new(&str)
+    }
+}
+
+impl From<SanitizedString> for String {
+    fn from(str: SanitizedString) -> Self {
+        String::from(str.0)
     }
 }
 
