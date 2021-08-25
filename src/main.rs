@@ -3,13 +3,20 @@ use serde::de::Visitor;
 use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 use std::fmt::{Error, Formatter};
-use std::fs::File;
+use std::fs::{File, DirEntry};
 use std::io::Write;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::{env, fmt, fs, io};
 use std::hash::Hash;
 use std::path::Path;
+use regex::Regex;
+use lazy_static::lazy_static;
+use std::ffi::OsString;
+
+lazy_static! {
+    static ref DATE_REGEX: Regex = Regex::new(r"(?P<y>\d{4,})(?P<m>0\d|1[012])(?P<d>[012]\d|3[01])").unwrap();
+}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -37,34 +44,20 @@ fn main() {
                     .collect::<Result<Vec<CsvLine>, csv::Error>>()
                     .unwrap();
 
-                let date_from_filename = &e.file_name().into_string().unwrap()[0..=7];
-
-                let year = &date_from_filename[0..=3];
-                let month = &date_from_filename[4..=5];
-                let day = &date_from_filename[6..=7];
-                let final_date = format!("{}-{}-{}T00:00:00.000000+00:00", year, month, day);
+                let activated_at = infer_date_from(&e).unwrap();
 
                 println!(
                     "Processing File: {:?}, timestamp: {:?}",
-                    e.file_name(),
-                    final_date
+                    e.file_name().clone(),
+                    activated_at
                 );
 
-                let activated_at_for_file = DateTime::parse_from_rfc3339(&final_date)
-                    .unwrap()
-                    .with_timezone(&Utc);
-
                 csv_result.into_iter().for_each(|csv_item| {
-                    intermediari.merge(csv_item.email.as_str().to_lowercase(), activated_at_for_file, |old, new| {
-                        println!(
-                            "In {:?} found an already present key: {:?}",
-                            e.file_name(),
-                            csv_item.email.as_str()
-                        );
+                    intermediari.merge(csv_item.email.as_str().to_lowercase(), activated_at, |old, new| {
                         if old <= new {old} else {new}
                     });
 
-                    organizations.merge(String::from(csv_item.anagrafica_organization), activated_at_for_file, |old, new| {
+                    organizations.merge(String::from(csv_item.anagrafica_organization), activated_at, |old, new| {
                         if old <= new {old} else {new}
                     });
                 });
@@ -96,6 +89,28 @@ fn main() {
     let organizations_updates = vec.join("\n");
     let mut organizations_sql_file = File::create(Path::new(output_path).join("update_organizations_activated_at.sql")).unwrap();
     organizations_sql_file.write_all(&organizations_updates.into_bytes()).unwrap();
+}
+
+fn infer_date_from(e: &DirEntry) -> Option<DateTime<Utc>> {
+    let metadata = fs::metadata(e.path());
+    let filename = e.file_name().into_string();
+
+    let from_metadata = metadata.and_then(|meta| meta.modified()).map(|modified| DateTime::from(modified) as DateTime<Utc>).map(|modified| {
+        let year = modified.year();
+        let month = modified.month();
+        let day = modified.day();
+        format!("{:04}-{:02}-{:02}T00:00:00.000000+00:00", year, month, day)
+    });
+
+    let from_filename = filename.and_then(|name| {
+        let c = DATE_REGEX.captures(&name).ok_or(OsString::new())?;
+        let year = u32::from_str(c.name("y").ok_or(OsString::new())?.as_str()).map_err(|_| OsString::new())?;
+        let month = u32::from_str(c.name("m").ok_or(OsString::new())?.as_str()).map_err(|_| OsString::new())?;
+        let day = u32::from_str(c.name("d").ok_or(OsString::new())?.as_str()).map_err(|_| OsString::new())?;
+        Ok(format!("{:04}-{:02}-{:02}T00:00:00.000000+00:00", year, month, day))
+    });
+
+    from_filename.or(from_metadata).ok().and_then(|s| DateTime::parse_from_rfc3339(&s).ok()).map(|d| d.with_timezone(&Utc))
 }
 
 #[derive(Deserialize, Clone, Debug)]
