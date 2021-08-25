@@ -8,10 +8,14 @@ use std::io::Write;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::{env, fmt, fs, io};
+use std::hash::Hash;
+use std::path::Path;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+    let default_output_path = ".".to_owned();
     let path = &args[1];
+    let output_path = args.get(2).unwrap_or_else(|| &default_output_path);
 
     let mut organizations: HashMap<String, DateTime<Utc>> = HashMap::new();
     let mut intermediari: HashMap<String, DateTime<Utc>> = HashMap::new();
@@ -51,57 +55,47 @@ fn main() {
                     .with_timezone(&Utc);
 
                 csv_result.into_iter().for_each(|csv_item| {
-                    let lowercase_email = String::from(csv_item.email.as_str()).to_lowercase();
-
-                    if intermediari.contains_key(&lowercase_email) {
+                    intermediari.merge(csv_item.email.as_str().to_lowercase(), activated_at_for_file, |old, new| {
                         println!(
-                            "Same intermediario email {:?} found twice",
+                            "In {:?} found an already present key: {:?}",
+                            e.file_name(),
                             csv_item.email.as_str()
-                        )
-                    }
-
-                    if intermediari
-                        .get(&lowercase_email)
-                        .filter(|&d| *d < activated_at_for_file)
-                        .is_none()
-                    {
-                        intermediari.insert(lowercase_email, activated_at_for_file);
-                    }
-
-                    if organizations
-                        .get(csv_item.anagrafica_organization.as_str())
-                        .filter(|&d| *d < activated_at_for_file)
-                        .is_none()
-                    {
-                        organizations.insert(
-                            csv_item.anagrafica_organization.into(),
-                            activated_at_for_file,
                         );
-                    }
+                        if old <= new {old} else {new}
+                    });
+
+                    organizations.merge(String::from(csv_item.anagrafica_organization), activated_at_for_file, |old, new| {
+                        if old <= new {old} else {new}
+                    });
                 });
             })
         })
         .collect::<Result<Vec<_>, io::Error>>()
         .unwrap();
 
-    let mut intermediari_sql_file = File::create("update_intermediari_activated_at.sql").unwrap();
 
-    intermediari.iter().for_each(|(k, v)| {
-        let date_sql = format!(
-            "{}-{:02}-{:02}T00:00:00.000000+00:00",
-            v.year(),
-            v.month(),
-            v.day()
-        );
 
-        let statement = format!(
-            "update intermediari set activated_at = '{}' where primary_email = '{}';\n",
-            date_sql, k
-        );
-        intermediari_sql_file
-            .write(&statement.into_bytes()[..])
-            .unwrap();
-    });
+    let vec = intermediari.into_iter().map(|(k, v)| format!(
+        "update intermediari set activated_at = '{}-{:02}-{:02}T00:00:00.000000+00:00' where primary_email = '{}';",
+        v.year(),
+        v.month(),
+        v.day(),
+        k,
+    )).collect::<Vec<String>>();
+    let intermediari_updates = vec.join("\n");
+    let mut intermediari_sql_file = File::create(Path::new(output_path).join("update_intermediari_activated_at.sql")).unwrap();
+    intermediari_sql_file.write_all(&intermediari_updates.into_bytes()).unwrap();
+
+    let vec = organizations.into_iter().map(|(k, v)| format!(
+        "update organizations set activated_at = '{}-{:02}-{:02}T00:00:00.000000+00:00' where anagrafica_id = '{}';",
+        v.year(),
+        v.month(),
+        v.day(),
+        k,
+    )).collect::<Vec<String>>();
+    let organizations_updates = vec.join("\n");
+    let mut organizations_sql_file = File::create(Path::new(output_path).join("update_organizations_activated_at.sql")).unwrap();
+    organizations_sql_file.write_all(&organizations_updates.into_bytes()).unwrap();
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -234,5 +228,21 @@ impl<'de> Visitor<'de> for SanitizedStringVisitor {
         E: serde::de::Error,
     {
         Ok(SanitizedString::new(v))
+    }
+}
+
+trait MapMergeable<K, V> {
+    fn merge<F>(&mut self, key: K, value: V, collision: F) -> &mut Self where F: Fn(V, V) -> V;
+}
+
+impl<K: Eq + Hash, V> MapMergeable<K, V> for HashMap<K, V> {
+    fn merge<F>(&mut self, key: K, value: V, collision: F) -> &mut Self where F: Fn(V, V) -> V {
+        if let Some(data) = self.remove(&key) {
+            self.insert(key, collision(data, value))
+        } else {
+            self.insert(key, value)
+        };
+
+        self
     }
 }
