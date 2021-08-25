@@ -53,11 +53,11 @@ fn main() {
                 );
 
                 csv_result.into_iter().for_each(|csv_item| {
-                    intermediari.merge(String::from(csv_item.anagrafica_intermediario).replace("'", ""), activated_at, |old, new| {
+                    intermediari.merge(as_current_anagrafica_id(csv_item.anagrafica_intermediario.as_str()), activated_at, |old, new| {
                         if old <= new {old} else {new}
                     });
 
-                    organizations.merge(String::from(csv_item.anagrafica_organization).replace("'", ""), activated_at, |old, new| {
+                    organizations.merge(as_current_anagrafica_id(csv_item.anagrafica_organization.as_str()), activated_at, |old, new| {
                         if old <= new {old} else {new}
                     });
                 });
@@ -111,6 +111,20 @@ fn infer_date_from(e: &DirEntry) -> Option<DateTime<Utc>> {
     });
 
     from_filename.or(from_metadata).ok().and_then(|s| DateTime::parse_from_rfc3339(&s).ok()).map(|d| d.with_timezone(&Utc))
+}
+
+/// Trying to infer current anagrafica_id from old csv value
+fn as_current_anagrafica_id(original: &str) -> String {
+    String::from(match original {
+        "A0839" => "B0630",
+        "A0244" => "B0648",
+        "A0629" => "B0595",
+        "B0396" => "A0774",
+        "A0282" => "B0673",
+        "B0280" => "A0456",
+        "B0165" => "A0787",
+        _ => original
+    })
 }
 
 #[derive(Deserialize, Clone, Debug)]
