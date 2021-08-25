@@ -53,11 +53,11 @@ fn main() {
                 );
 
                 csv_result.into_iter().for_each(|csv_item| {
-                    intermediari.merge(csv_item.email.as_str().to_lowercase(), activated_at, |old, new| {
+                    intermediari.merge(csv_item.email.as_str().to_lowercase().replace("'", ""), activated_at, |old, new| {
                         if old <= new {old} else {new}
                     });
 
-                    organizations.merge(String::from(csv_item.anagrafica_organization), activated_at, |old, new| {
+                    organizations.merge(String::from(csv_item.anagrafica_organization).replace("'", ""), activated_at, |old, new| {
                         if old <= new {old} else {new}
                     });
                 });
