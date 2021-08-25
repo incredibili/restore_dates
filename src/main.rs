@@ -53,7 +53,7 @@ fn main() {
                 );
 
                 csv_result.into_iter().for_each(|csv_item| {
-                    intermediari.merge(csv_item.email.as_str().to_lowercase().replace("'", ""), activated_at, |old, new| {
+                    intermediari.merge(String::from(csv_item.anagrafica_intermediario).replace("'", ""), activated_at, |old, new| {
                         if old <= new {old} else {new}
                     });
 
@@ -69,7 +69,7 @@ fn main() {
 
 
     let vec = intermediari.into_iter().map(|(k, v)| format!(
-        "update intermediari set activated_at = '{}-{:02}-{:02}T00:00:00.000000+00:00' where primary_email = '{}';",
+        "update intermediari set activated_at = '{}-{:02}-{:02}T00:00:00.000000+00:00' where anagrafica_id = '{}';",
         v.year(),
         v.month(),
         v.day(),
