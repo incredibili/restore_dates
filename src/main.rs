@@ -3,15 +3,26 @@ use serde::de::Visitor;
 use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 use std::fmt::{Error, Formatter};
-use std::fs::File;
+use std::fs::{File, DirEntry};
 use std::io::Write;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::{env, fmt, fs, io};
+use std::hash::Hash;
+use std::path::Path;
+use regex::Regex;
+use lazy_static::lazy_static;
+use std::ffi::OsString;
+
+lazy_static! {
+    static ref DATE_REGEX: Regex = Regex::new(r"(?P<y>\d{4,})(?P<m>0\d|1[012])(?P<d>[012]\d|3[01])").unwrap();
+}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+    let default_output_path = ".".to_owned();
     let path = &args[1];
+    let output_path = args.get(2).unwrap_or_else(|| &default_output_path);
 
     let mut organizations: HashMap<String, DateTime<Utc>> = HashMap::new();
     let mut intermediari: HashMap<String, DateTime<Utc>> = HashMap::new();
@@ -33,75 +44,87 @@ fn main() {
                     .collect::<Result<Vec<CsvLine>, csv::Error>>()
                     .unwrap();
 
-                let date_from_filename = &e.file_name().into_string().unwrap()[0..=7];
-
-                let year = &date_from_filename[0..=3];
-                let month = &date_from_filename[4..=5];
-                let day = &date_from_filename[6..=7];
-                let final_date = format!("{}-{}-{}T00:00:00.000000+00:00", year, month, day);
+                let activated_at = infer_date_from(&e).unwrap();
 
                 println!(
                     "Processing File: {:?}, timestamp: {:?}",
-                    e.file_name(),
-                    final_date
+                    e.file_name().clone(),
+                    activated_at
                 );
 
-                let activated_at_for_file = DateTime::parse_from_rfc3339(&final_date)
-                    .unwrap()
-                    .with_timezone(&Utc);
-
                 csv_result.into_iter().for_each(|csv_item| {
-                    let lowercase_email = String::from(csv_item.email.as_str()).to_lowercase();
+                    intermediari.merge(as_current_anagrafica_id(csv_item.anagrafica_intermediario.as_str()), activated_at, |old, new| {
+                        if old <= new {old} else {new}
+                    });
 
-                    if intermediari.contains_key(&lowercase_email) {
-                        println!(
-                            "Same intermediario email {:?} found twice",
-                            csv_item.email.as_str()
-                        )
-                    }
-
-                    if intermediari
-                        .get(&lowercase_email)
-                        .filter(|&d| *d < activated_at_for_file)
-                        .is_none()
-                    {
-                        intermediari.insert(lowercase_email, activated_at_for_file);
-                    }
-
-                    if organizations
-                        .get(csv_item.anagrafica_organization.as_str())
-                        .filter(|&d| *d < activated_at_for_file)
-                        .is_none()
-                    {
-                        organizations.insert(
-                            csv_item.anagrafica_organization.into(),
-                            activated_at_for_file,
-                        );
-                    }
+                    organizations.merge(as_current_anagrafica_id(csv_item.anagrafica_organization.as_str()), activated_at, |old, new| {
+                        if old <= new {old} else {new}
+                    });
                 });
             })
         })
         .collect::<Result<Vec<_>, io::Error>>()
         .unwrap();
 
-    let mut intermediari_sql_file = File::create("update_intermediari_activated_at.sql").unwrap();
 
-    intermediari.iter().for_each(|(k, v)| {
-        let date_sql = format!(
-            "{}-{:02}-{:02}T00:00:00.000000+00:00",
-            v.year(),
-            v.month(),
-            v.day()
-        );
 
-        let statement = format!(
-            "update intermediari set activated_at = '{}' where primary_email = '{}';\n",
-            date_sql, k
-        );
-        intermediari_sql_file
-            .write(&statement.into_bytes()[..])
-            .unwrap();
+    let vec = intermediari.into_iter().map(|(k, v)| format!(
+        "update intermediari set activated_at = '{}-{:02}-{:02}T00:00:00.000000+00:00' where anagrafica_id = '{}';",
+        v.year(),
+        v.month(),
+        v.day(),
+        k,
+    )).collect::<Vec<String>>();
+    let intermediari_updates = vec.join("\n");
+    let mut intermediari_sql_file = File::create(Path::new(output_path).join("update_intermediari_activated_at.sql")).unwrap();
+    intermediari_sql_file.write_all(&intermediari_updates.into_bytes()).unwrap();
+
+    let vec = organizations.into_iter().map(|(k, v)| format!(
+        "update organizations set activated_at = '{}-{:02}-{:02}T00:00:00.000000+00:00' where anagrafica_id = '{}';",
+        v.year(),
+        v.month(),
+        v.day(),
+        k,
+    )).collect::<Vec<String>>();
+    let organizations_updates = vec.join("\n");
+    let mut organizations_sql_file = File::create(Path::new(output_path).join("update_organizations_activated_at.sql")).unwrap();
+    organizations_sql_file.write_all(&organizations_updates.into_bytes()).unwrap();
+}
+
+fn infer_date_from(e: &DirEntry) -> Option<DateTime<Utc>> {
+    let metadata = fs::metadata(e.path());
+    let filename = e.file_name().into_string();
+
+    let from_metadata = metadata.and_then(|meta| meta.modified()).map(|modified| DateTime::from(modified) as DateTime<Utc>).map(|modified| {
+        let year = modified.year();
+        let month = modified.month();
+        let day = modified.day();
+        format!("{:04}-{:02}-{:02}T00:00:00.000000+00:00", year, month, day)
     });
+
+    let from_filename = filename.and_then(|name| {
+        let c = DATE_REGEX.captures(&name).ok_or(OsString::new())?;
+        let year = u32::from_str(c.name("y").ok_or(OsString::new())?.as_str()).map_err(|_| OsString::new())?;
+        let month = u32::from_str(c.name("m").ok_or(OsString::new())?.as_str()).map_err(|_| OsString::new())?;
+        let day = u32::from_str(c.name("d").ok_or(OsString::new())?.as_str()).map_err(|_| OsString::new())?;
+        Ok(format!("{:04}-{:02}-{:02}T00:00:00.000000+00:00", year, month, day))
+    });
+
+    from_filename.or(from_metadata).ok().and_then(|s| DateTime::parse_from_rfc3339(&s).ok()).map(|d| d.with_timezone(&Utc))
+}
+
+/// Trying to infer current anagrafica_id from old csv value
+fn as_current_anagrafica_id(original: &str) -> String {
+    String::from(match original {
+        "A0839" => "B0630",
+        "A0244" => "B0648",
+        "A0629" => "B0595",
+        "B0396" => "A0774",
+        "A0282" => "B0673",
+        "B0280" => "A0456",
+        "B0165" => "A0787",
+        _ => original
+    })
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -234,5 +257,21 @@ impl<'de> Visitor<'de> for SanitizedStringVisitor {
         E: serde::de::Error,
     {
         Ok(SanitizedString::new(v))
+    }
+}
+
+trait MapMergeable<K, V> {
+    fn merge<F>(&mut self, key: K, value: V, collision: F) -> &mut Self where F: Fn(V, V) -> V;
+}
+
+impl<K: Eq + Hash, V> MapMergeable<K, V> for HashMap<K, V> {
+    fn merge<F>(&mut self, key: K, value: V, collision: F) -> &mut Self where F: Fn(V, V) -> V {
+        if let Some(data) = self.remove(&key) {
+            self.insert(key, collision(data, value))
+        } else {
+            self.insert(key, value)
+        };
+
+        self
     }
 }
